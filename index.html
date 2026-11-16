@@ -313,15 +313,18 @@
         .chips { display: flex; flex-wrap: wrap; gap: 8px; min-height: 40px; align-items: center; }
         .chip { margin: 0; }
         .chip input { position: absolute; opacity: 0; pointer-events: none; }
-        .chip span {
+        .chip > span {
             display: inline-flex; align-items: center; gap: 7px; cursor: pointer; user-select: none;
             padding: 7px 13px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface-2);
             font-size: .86rem; font-weight: 600; color: var(--ink-2); transition: all .15s;
         }
-        .chip span:hover { border-color: var(--line-strong); color: var(--ink); }
+        .chip > span:hover { border-color: var(--line-strong); color: var(--ink); }
         .chip input:checked + span { background: var(--cyan-soft); border-color: var(--cyan); color: var(--cyan); }
+        .chip input:checked + span .chip-sub { color: var(--cyan); opacity: .75; }
         .chip input:checked + span::before { content: '\f00c'; font-family: 'Font Awesome 6 Free'; font-weight: 900; font-size: .7rem; }
         .chip input:focus-visible + span { outline: 2px solid var(--cyan); outline-offset: 2px; }
+        .chip-sub { font-weight: 500; color: var(--ink-3); font-size: .76rem; }
+        .chip .mono { font-weight: 600; }
         .hint { font-size: .82rem; color: var(--ink-3); }
         .hint.err { color: var(--magenta); }
 
@@ -628,9 +631,15 @@
                         <div class="form-block">
                             <div>
                                 <div class="fb-title"><span class="fb-num">1</span>Mesin</div>
-                                <div class="fb-desc">Pilih serial number untuk mengisi customer dan tipe otomatis.</div>
+                                <div class="fb-desc" id="mesinDesc">Pilih serial number untuk mengisi customer dan tipe otomatis.</div>
                             </div>
                             <div class="row g-3">
+                                <div class="col-12">
+                                    <div class="seg" id="modeSeg" role="group" aria-label="Jumlah mesin dalam laporan">
+                                        <button type="button" data-mode="single" class="active" onclick="setMode('single')"><i class="fa-solid fa-print me-1"></i>Satu mesin</button>
+                                        <button type="button" data-mode="bulk" onclick="setMode('bulk')"><i class="fa-solid fa-layer-group me-1"></i>Banyak mesin sekaligus</button>
+                                    </div>
+                                </div>
                                 <div class="col-md-6 col-xl-3">
                                     <label for="tanggal" class="form-label">Tanggal kunjungan</label>
                                     <input type="date" class="form-control" id="tanggal" required>
@@ -641,17 +650,27 @@
                                         <option value="">Pilih customer</option>
                                     </select>
                                 </div>
-                                <div class="col-md-6 col-xl-3">
+                                <div class="col-md-6 col-xl-3" id="colTipe">
                                     <label for="tipeMesin" class="form-label">Tipe mesin</label>
                                     <select class="form-select" id="tipeMesin" required onchange="onMachineTypeChange()">
                                         <option value="">Pilih tipe mesin</option>
                                     </select>
                                 </div>
-                                <div class="col-md-6 col-xl-3">
+                                <div class="col-md-6 col-xl-3" id="colSn">
                                     <label for="serialNumber" class="form-label">Serial number</label>
                                     <select class="form-select mono" id="serialNumber" required onchange="autofillBySN()">
                                         <option value="">Pilih serial number</option>
                                     </select>
+                                </div>
+                                <div class="col-12 d-none" id="bulkBox">
+                                    <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
+                                        <span class="form-label mb-0" id="bulkCount">Mesin yang dikerjakan</span>
+                                        <div class="d-flex gap-2">
+                                            <button type="button" class="btn-x btn-plain" style="padding: 4px 10px; font-size: .78rem;" onclick="bulkSelectAll(true)">Pilih semua</button>
+                                            <button type="button" class="btn-x btn-plain" style="padding: 4px 10px; font-size: .78rem;" onclick="bulkSelectAll(false)">Kosongkan</button>
+                                        </div>
+                                    </div>
+                                    <div class="chips" id="bulkMachines"><span class="hint">Pilih customer dulu untuk menampilkan semua mesinnya.</span></div>
                                 </div>
                             </div>
                         </div>
@@ -712,6 +731,7 @@
                                 <div class="col-12">
                                     <span class="form-label d-block">Sparepart yang diganti</span>
                                     <div class="chips" id="sparepartContainer"><span class="hint">Pilih tipe mesin dulu untuk melihat daftar sparepart.</span></div>
+                                    <div class="hint mt-2 d-none" id="sparepartBulkHint">Sparepart yang dicentang dicatat di setiap mesin yang dipilih. Kalau sparepart hanya dipakai di satu mesin, edit laporan mesin itu setelah disimpan.</div>
                                 </div>
                                 <div class="col-12">
                                     <span class="form-label d-block">Foto pekerjaan</span>
@@ -965,7 +985,7 @@
         records: [], customers: [], teknisi: [],
         limit: PAGE_SIZE, quick: null,
         editing: null, editPassword: null,
-        sparepartReq: 0, sparepartCache: {},
+        sparepartReq: 0, sparepartCache: {}, mode: 'single', reportCount: {},
         historySn: null, pwdAction: null
     };
 
@@ -1331,6 +1351,7 @@
         setOptions('serialNumber', uniq(rows.map(r => r[2])), 'Pilih serial number');
     }
     function onCustomerChange() {
+        if (state.mode === 'bulk') { renderBulkMachines(); return; }
         refreshTipe();
         refreshSn();
         loadSpareparts($('tipeMesin').value, selectedParts());
@@ -1356,13 +1377,17 @@
     function loadSpareparts(tipe, preselected = []) {
         const box = $('sparepartContainer');
         const req = ++state.sparepartReq;
-        if (!tipe) {
-            box.innerHTML = '<span class="hint">Pilih tipe mesin dulu untuk melihat daftar sparepart.</span>';
+        const types = (Array.isArray(tipe) ? tipe : [tipe]).filter(Boolean);
+        if (!types.length) {
+            box.innerHTML = state.mode === 'bulk'
+                ? '<span class="hint">Pilih minimal satu mesin untuk melihat daftar sparepart.</span>'
+                : '<span class="hint">Pilih tipe mesin dulu untuk melihat daftar sparepart.</span>';
             return;
         }
-        const render = parts => {
+        const render = () => {
             if (req !== state.sparepartReq) return;
-            const list = [...parts];
+            const list = [];
+            types.forEach(t => (state.sparepartCache[t] || []).forEach(p => { if (!list.includes(p)) list.push(p); }));
             preselected.forEach(p => { if (p && !list.includes(p)) list.push(p); });
             if (!list.length) {
                 box.innerHTML = '<span class="hint">Belum ada daftar sparepart untuk tipe ini. Tambahkan di tab "Sparepart".</span>';
@@ -1371,11 +1396,75 @@
             box.innerHTML = list.map(p => `
                 <label class="chip"><input type="checkbox" class="sparepart-checkbox" value="${esc(p)}" ${preselected.includes(p) ? 'checked' : ''}><span>${esc(p)}</span></label>`).join('');
         };
-        if (state.sparepartCache[tipe]) return render(state.sparepartCache[tipe]);
+        const missing = types.filter(t => !state.sparepartCache[t]);
+        if (!missing.length) return render();
         box.innerHTML = '<span class="hint"><i class="fa-solid fa-spinner fa-spin me-1"></i>Memuat sparepart...</span>';
-        gs('getSparepartList', tipe)
-            .then(parts => { state.sparepartCache[tipe] = parts || []; render(state.sparepartCache[tipe]); })
+        Promise.all(missing.map(t => gs('getSparepartList', t).then(parts => { state.sparepartCache[t] = parts || []; })))
+            .then(render)
             .catch(e => { if (req === state.sparepartReq) box.innerHTML = `<span class="hint err">Sparepart gagal dimuat: ${esc(errMsg(e))}</span>`; });
+    }
+
+    // ====================== MODE BANYAK MESIN ======================
+    function setMode(mode) {
+        if (mode === 'bulk' && state.editing) {
+            toast('Laporan yang sedang diedit hanya untuk satu mesin. Batalkan edit dulu untuk input banyak mesin.', 'err');
+            return;
+        }
+        state.mode = mode;
+        const bulk = mode === 'bulk';
+        document.querySelectorAll('#modeSeg button').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
+        $('colTipe').classList.toggle('d-none', bulk);
+        $('colSn').classList.toggle('d-none', bulk);
+        $('tipeMesin').required = !bulk;
+        $('serialNumber').required = !bulk;
+        $('bulkBox').classList.toggle('d-none', !bulk);
+        $('sparepartBulkHint').classList.toggle('d-none', !bulk);
+        $('mesinDesc').textContent = bulk
+            ? 'Pilih customer, lalu centang mesin yang dikerjakan. Satu laporan akan dicatat untuk setiap mesin.'
+            : 'Pilih serial number untuk mengisi customer dan tipe otomatis.';
+        if (bulk) renderBulkMachines();
+        else loadSpareparts($('tipeMesin').value, selectedParts());
+    }
+
+    function bulkSelected() {
+        return [...document.querySelectorAll('.bulk-machine:checked')].map(cb => ({ sn: cb.value, tipe: cb.dataset.tipe }));
+    }
+
+    function renderBulkMachines() {
+        const box = $('bulkMachines');
+        const c = $('customer').value;
+        if (!c) {
+            box.innerHTML = '<span class="hint">Pilih customer dulu untuk menampilkan semua mesinnya.</span>';
+            $('bulkCount').textContent = 'Mesin yang dikerjakan';
+            loadSpareparts([], selectedParts());
+            return;
+        }
+        const seen = {};
+        const machines = state.customers
+            .filter(r => r[0] === c && r[2] && !seen[r[2]] && (seen[r[2]] = true))
+            .map(r => ({ tipe: r[1], sn: r[2] }))
+            .sort((a, b) => a.tipe.localeCompare(b.tipe) || a.sn.localeCompare(b.sn));
+        if (!machines.length) {
+            box.innerHTML = '<span class="hint">Customer ini belum punya mesin di tab "Customer".</span>';
+            $('bulkCount').textContent = 'Mesin yang dikerjakan';
+            loadSpareparts([], selectedParts());
+            return;
+        }
+        box.innerHTML = machines.map(m => `
+            <label class="chip"><input type="checkbox" class="bulk-machine" value="${esc(m.sn)}" data-tipe="${esc(m.tipe)}" checked onchange="onBulkChange()"><span><span class="mono">${esc(m.sn)}</span><small class="chip-sub">${esc(m.tipe)}</small></span></label>`).join('');
+        onBulkChange();
+    }
+
+    function onBulkChange() {
+        const all = document.querySelectorAll('.bulk-machine').length;
+        const picked = bulkSelected();
+        $('bulkCount').textContent = `${picked.length} dari ${all} mesin dipilih`;
+        loadSpareparts(uniq(picked.map(m => m.tipe)), selectedParts());
+    }
+
+    function bulkSelectAll(on) {
+        document.querySelectorAll('.bulk-machine').forEach(cb => { cb.checked = on; });
+        onBulkChange();
     }
 
     // ====================== FOTO ======================
@@ -1484,6 +1573,13 @@
             if (first) first.focus();
             return;
         }
+        const bulk = state.mode === 'bulk' && !state.editing;
+        const machines = bulk ? bulkSelected() : [];
+        if (bulk && !machines.length) {
+            toast('Centang minimal satu mesin yang dikerjakan.', 'err');
+            $('bulkBox').scrollIntoView({ behavior: 'smooth', block: 'center' });
+            return;
+        }
         const teknisi = selectedTeknisi();
         if (!teknisi.length) {
             toast('Pilih minimal satu teknisi yang bertugas.', 'err');
@@ -1520,8 +1616,16 @@
                 payload.password = state.editPassword;
             }
             const wasEdit = !!state.editing;
-            const res = await gs('saveRecord', payload);
-            toast(`${wasEdit ? 'Perubahan disimpan' : 'Laporan tersimpan'}, nomor ${res.noReport}.`);
+            if (bulk) {
+                delete payload.tipeMesin;
+                delete payload.serialNumber;
+                payload.machines = machines;
+                const res = await gs('saveBulkRecords', payload);
+                toast(`Laporan tersimpan untuk ${res.count} mesin, nomor ${res.noReport}.`);
+            } else {
+                const res = await gs('saveRecord', payload);
+                toast(`${wasEdit ? 'Perubahan disimpan' : 'Laporan tersimpan'}, nomor ${res.noReport}.`);
+            }
             resetFormMode();
             await loadAll();
             go('riwayat');
@@ -1547,6 +1651,7 @@
         $('signatureInfo').textContent = 'Minta customer tanda tangan langsung di layar.';
         $('fotoInfo').textContent = 'Bisa lebih dari satu, otomatis dikompres sebelum diupload.';
         $('editBanner').classList.remove('show');
+        if (state.mode === 'bulk') renderBulkMachines();
         if ($('pageTitle').textContent === 'Edit laporan') $('pageTitle').textContent = PAGES.form[0];
         resetBtn();
     }
@@ -1614,6 +1719,7 @@
 
     function fillEdit(rec, pwd) {
         resetFormMode();
+        if (state.mode === 'bulk') setMode('single');
         state.editing = rec;
         state.editPassword = pwd;
 
@@ -1711,7 +1817,7 @@
 
     function rowHtml(r) {
         return `<tr>
-            <td class="nowrap"><div class="fw-semibold">${esc(shortDate(r.tanggalISO, r.tanggal))}</div><div class="report-no">${esc(r.noReport || '-')}</div></td>
+            <td class="nowrap"><div class="fw-semibold">${esc(shortDate(r.tanggalISO, r.tanggal))}</div><div class="report-no">${reportNoHtml(r)}</div></td>
             <td class="cust">${esc(r.customer)}</td>
             <td class="nowrap"><div>${esc(r.tipe)}</div><div class="mt-1">${snTag(r)}</div></td>
             <td>${jenisHtml(r.jenis)}</td>
@@ -1730,7 +1836,7 @@
             <div class="m-head">
                 <div>
                     <div class="m-cust">${esc(r.customer)}</div>
-                    <div class="report-no">${esc(shortDate(r.tanggalISO, r.tanggal))}, ${esc(r.noReport || '-')}</div>
+                    <div class="report-no">${esc(shortDate(r.tanggalISO, r.tanggal))}, ${reportNoHtml(r)}</div>
                 </div>
                 ${actionsHtml(r)}
             </div>
@@ -1744,7 +1850,14 @@
         </div>`;
     }
 
+    function reportNoHtml(r) {
+        const n = r.noReport ? (state.reportCount[r.noReport] || 1) : 1;
+        return esc(r.noReport || '-') + (n > 1 ? ` (${n} mesin)` : '');
+    }
+
     function renderList() {
+        state.reportCount = {};
+        state.records.forEach(x => { if (x.noReport) state.reportCount[x.noReport] = (state.reportCount[x.noReport] || 0) + 1; });
         const data = getFiltered();
         const shown = data.slice(0, state.limit);
         $('resultCount').textContent = data.length
@@ -1902,14 +2015,30 @@
         if (!r) { toast('Data tidak ditemukan. Tekan tombol muat ulang.', 'err'); return; }
         const photos = r.foto.slice(0, 4).map(u => `<img src="${esc(driveImg(u, 600))}" alt="">`).join('');
         const ttd = r.ttd ? `<img src="${esc(driveImg(r.ttd, 500))}" alt="" style="max-height:80px;max-width:100%;">` : '';
+        // Laporan banyak mesin: semua baris dengan No. Report yang sama dicetak dalam satu dokumen
+        const group = r.noReport
+            ? state.records.filter(x => x.noReport === r.noReport && x.customer === r.customer)
+                .sort((x, y) => x.tipe.localeCompare(y.tipe) || x.sn.localeCompare(y.sn))
+            : [r];
+        const multi = group.length > 1;
+        const machineTable = multi ? `
+            <div class="rpt-h">Daftar mesin (${group.length} unit)</div>
+            <table class="rpt-table">
+                <tr><th style="width:6%">No</th><th style="width:auto">Tipe mesin</th><th style="width:auto">Serial number</th><th style="width:auto">Status mesin</th><th style="width:auto">Status pekerjaan</th></tr>
+                ${group.map((x, i) => `<tr><td>${i + 1}</td><td>${esc(x.tipe)}</td><td>${esc(x.sn)}</td><td>${esc(x.statusMesin)}</td><td>${esc(x.statusPengerjaan)}</td></tr>`).join('')}
+            </table>` : '';
         printHTML(`<div class="rpt">
             ${rptHeader('Service Report', '', 'Nomor report', esc(r.noReport || ('Baris ' + r.row)))}
             <table class="rpt-table">
                 <tr><th>Tanggal</th><td>${esc(r.tanggal)}</td><th>Jenis</th><td>${esc(r.jenis)}</td></tr>
                 <tr><th>Customer</th><td colspan="3">${esc(r.customer)}</td></tr>
-                <tr><th>Tipe mesin</th><td>${esc(r.tipe)}</td><th>Serial number</th><td>${esc(r.sn)}</td></tr>
-                <tr><th>Teknisi</th><td>${esc(r.teknisi)}</td><th>Status</th><td>Mesin: ${esc(r.statusMesin)}<br>Pekerjaan: ${esc(r.statusPengerjaan)}</td></tr>
+                ${multi
+                    ? `<tr><th>Jumlah mesin</th><td colspan="3">${group.length} unit (rincian di bawah)</td></tr>
+                       <tr><th>Teknisi</th><td colspan="3">${esc(r.teknisi)}</td></tr>`
+                    : `<tr><th>Tipe mesin</th><td>${esc(r.tipe)}</td><th>Serial number</th><td>${esc(r.sn)}</td></tr>
+                       <tr><th>Teknisi</th><td>${esc(r.teknisi)}</td><th>Status</th><td>Mesin: ${esc(r.statusMesin)}<br>Pekerjaan: ${esc(r.statusPengerjaan)}</td></tr>`}
             </table>
+            ${machineTable}
             <div class="rpt-h">Problem atau kendala</div>
             <div class="rpt-box">${nl(r.problem)}</div>
             <div class="rpt-h">Solusi atau tindakan</div>

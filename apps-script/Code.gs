@@ -1,5 +1,5 @@
 /**
- * Maintenance History Report — Code.gs (v3, API untuk GitHub Pages)
+ * Maintenance History Report — Code.gs (v4, API untuk GitHub Pages)
  *
  * Tampilan (index.html) di-host di GitHub Pages, script ini hanya melayani data lewat API.
  *
@@ -43,6 +43,7 @@ const API = {
   getSparepartList: tipe => getSparepartList_(tipe),
   verifyPassword: pwd => verifyPassword_(pwd),
   saveRecord: data => saveRecord_(data),
+  saveBulkRecords: data => saveBulkRecords_(data),
   deleteRecord: (row, sn, pwd) => deleteRecord_(row, sn, pwd)
 };
 
@@ -53,7 +54,7 @@ function json_(obj) {
 
 /** Cek cepat dari browser: buka link /exec, harus muncul {"ok":true,...}. */
 function doGet() {
-  return json_({ ok: true, app: 'Maintenance History Report API', version: 3 });
+  return json_({ ok: true, app: 'Maintenance History Report API', version: 4 });
 }
 
 /**
@@ -392,6 +393,74 @@ function saveRecord_(data) {
     autoSaveCustomerMaster_(data.customer, data.tipeMesin, data.serialNumber);
     SpreadsheetApp.flush();
     return { row: row, noReport: noReport };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * Satu laporan untuk banyak mesin sekaligus (misalnya flushing semua mesin di satu customer).
+ * data.machines = [{ tipe, sn }, ...]. Setiap mesin jadi satu baris, dengan No. Report,
+ * foto, dan tanda tangan yang sama.
+ */
+function saveBulkRecords_(data) {
+  if (!data) throw new Error('Data kosong.');
+  const wajib = {
+    customer: 'Nama Customer', kategori: 'Jenis Maintenance', teknisi: 'Teknisi',
+    statusMesin: 'Status Mesin', statusPengerjaan: 'Status Pengerjaan'
+  };
+  Object.keys(wajib).forEach(k => {
+    if (!str_(data[k])) throw new Error('Kolom "' + wajib[k] + '" wajib diisi.');
+  });
+
+  const seen = {};
+  const machines = (Array.isArray(data.machines) ? data.machines : [])
+    .map(m => ({ tipe: str_(m && m.tipe), sn: str_(m && m.sn) }))
+    .filter(m => m.sn && !seen[m.sn.toLowerCase()] && (seen[m.sn.toLowerCase()] = true));
+  if (!machines.length) throw new Error('Pilih minimal satu mesin.');
+  if (machines.length > 200) throw new Error('Maksimal 200 mesin dalam satu laporan.');
+
+  const tanggal = parseTanggal_(data.tanggal);
+  if (!tanggal) throw new Error('Tanggal tidak valid.');
+
+  const foto = uploadFiles_(data.filesData, CONFIG.FOLDER_FOTO).join(',');
+  let ttd = '';
+  if (data.signature && data.signature.indexOf(',') > -1) {
+    ttd = uploadBase64_({
+      bytes: data.signature.split(',')[1],
+      mimeType: 'image/png',
+      filename: 'TTD_' + str_(data.customer).replace(/[^\w-]+/g, '_') + '_' + Date.now() + '.png'
+    }, getFolder_(CONFIG.FOLDER_TTD));
+  }
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const sheet = getDataSheet_();
+    ensureHeaders_(sheet);
+    const noReport = generateNoReport_(tanggal);
+    const rows = machines.map(m => [
+      tanggal,
+      sanitize_(data.customer),
+      sanitize_(m.tipe),
+      sanitize_(m.sn),
+      sanitize_(data.kategori),
+      sanitize_(data.teknisi),
+      sanitize_(data.problem),
+      sanitize_(data.solusi),
+      sanitize_(data.statusMesin),
+      sanitize_(data.statusPengerjaan),
+      foto,
+      sanitize_(data.sparepart) || '-',
+      noReport,
+      ttd,
+      sanitize_(data.penerima)
+    ]);
+    const start = sheet.getLastRow() + 1;
+    sheet.getRange(start, 1, rows.length, NUM_COLS).setValues(rows);
+    sheet.getRange(start, 1, rows.length, 1).setNumberFormat('dd/mm/yyyy');
+    SpreadsheetApp.flush();
+    return { count: rows.length, noReport: noReport };
   } finally {
     lock.releaseLock();
   }
